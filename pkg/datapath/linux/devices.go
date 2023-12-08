@@ -42,7 +42,7 @@ var (
 		Table: unix.RT_TABLE_UNSPEC,
 	}
 	routeFilterMask            = netlink.RT_FILTER_TABLE
-	staticDevicesCheckInterval = 10 * time.Minute
+	staticDevicesCheckInterval = 30 * time.Second
 	tcFilterParentIngress      = 0xfffffff2
 	tcFilterParentEgress       = 0xfffffff3
 )
@@ -311,29 +311,6 @@ func (dm *DeviceManager) updateDevicesFromRoutes(l3DevOK bool, routes []netlink.
 // Listen starts listening to changes to network devices. When devices change the new set
 // of devices is sent on the returned channel.
 func (dm *DeviceManager) Listen(ctx context.Context) (chan []string, error) {
-	l3DevOK := supportL3Dev()
-	routeChan := make(chan netlink.RouteUpdate)
-	closeChan := make(chan struct{})
-
-	err := netlink.RouteSubscribeWithOptions(routeChan, closeChan,
-		netlink.RouteSubscribeOptions{
-			// List existing routes to make sure we did not miss changes that happened after Detect().
-			ListExisting: true,
-			Namespace:    &dm.netns,
-		})
-	if err != nil {
-		return nil, err
-	}
-
-	linkChan := make(chan netlink.LinkUpdate)
-
-	err = netlink.LinkSubscribeWithOptions(linkChan, closeChan, netlink.LinkSubscribeOptions{
-		ListExisting: false,
-		Namespace:    &dm.netns,
-	})
-	if err != nil {
-		return nil, err
-	}
 
 	devicesChan := make(chan []string, 1)
 
@@ -374,42 +351,12 @@ func (dm *DeviceManager) Listen(ctx context.Context) (chan []string, error) {
 			select {
 			case <-ctx.Done():
 				log.Debug("context closed, Listen() stopping")
-				close(closeChan)
-				close(devicesChan)
 				ticker.Stop()
-				// drain the route and link channels
-				for range routeChan {
-				}
-				for range linkChan {
-				}
 				return
-
-			case update := <-routeChan:
-				if update.Type == unix.RTM_NEWROUTE {
-					dm.Lock()
-					lostTCFilter := dm.checkTCFiltersLostByRoute(update.Route)
-					routesChange := dm.updateDevicesFromRoutes(l3DevOK, []netlink.Route{update.Route})
-					staticDeviceChange := dm.checkStaticDevices(false) // 检查 --devices 指定的设备是否配置丢失
-					devicesChanged = routesChange || staticDeviceChange || lostTCFilter
-					devices = dm.getDeviceList()
-					dm.Unlock()
-				}
-
-			case update := <-linkChan:
-				if update.Header.Type == unix.RTM_DELLINK {
-					name := update.Attrs().Name
-					dm.Lock()
-					if _, ok := dm.devices[name]; ok {
-						delete(dm.devices, name)
-						devicesChanged = true
-					}
-					devices = dm.getDeviceList()
-					dm.Unlock()
-				}
 			case <-ticker.C:
 				// check device is ok and recover
 				dm.Lock()
-				devicesChanged = dm.checkStaticDevices(true) // 检查 --devices 指定的设备是否配置丢失，或者 tc filter 丢失
+				devicesChanged = dm.checkStaticDevices() // 检查 --devices 指定的设备是否配置丢失，或者 tc filter 丢失
 				devices = dm.getDeviceList()
 				if devicesChanged {
 					log.WithField(logfields.Devices, devices).Info("Ticker check for static devices, ")
@@ -490,7 +437,7 @@ func (dm *DeviceManager) expandDeviceWildcards(devices []string, option string) 
 	return expandedDevices, nil
 }
 
-func (dm *DeviceManager) checkStaticDevices(checkTC bool) bool {
+func (dm *DeviceManager) checkStaticDevices() bool {
 
 	// 检查以下内容：
 	//  1. 通过 --devices 配置的设备是否配置丢失
@@ -536,7 +483,7 @@ func (dm *DeviceManager) checkStaticDevices(checkTC bool) bool {
 		}
 
 		// tc filter 丢失
-		if checkTC && exists && dm.tcFiltersLost(link) {
+		if exists && dm.tcFiltersLost(link) {
 			log.WithField("device", name).
 				WithField("method", "checkStaticDevices").
 				Info("Static device tc filter lost, load again")
@@ -572,35 +519,6 @@ func (dm *DeviceManager) tcFiltersLost(link netlink.Link) bool {
 	}
 
 	return len(allFilters) == 0
-}
-
-func (dm *DeviceManager) checkTCFiltersLostByRoute(route netlink.Route) bool {
-
-	// 当路由信息变化时，检查已配置的设备，是否丢失了 TCFilters
-	if route.Dst != nil && !route.Dst.IP.IsGlobalUnicast() {
-		return false
-	}
-	if route.Table == unix.RT_TABLE_LOCAL || route.Dst == nil {
-		return false
-	}
-
-	changed := false
-
-	link, err := dm.handle.LinkByIndex(route.LinkIndex)
-	if err != nil {
-		log.WithError(err).WithField(logfields.LinkIndex, route.LinkIndex).
-			WithField("method", "checkTCFiltersLostByRoute").
-			Warn("Failed to get link by index")
-		return false
-	}
-	name := link.Attrs().Name
-	if _, exists := dm.devices[name]; exists && dm.tcFiltersLost(link) {
-		log.WithField("device", name).WithField("method", "checkTCFiltersLostByRoute").
-			Info("Static device tc filter lost, load again")
-		changed = true
-	}
-
-	return changed
 }
 
 func findK8SNodeIPLink() (netlink.Link, error) {
