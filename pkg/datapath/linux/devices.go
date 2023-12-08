@@ -8,9 +8,11 @@ package linux
 import (
 	"context"
 	"fmt"
+	"github.com/spf13/viper"
 	"net"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
@@ -39,7 +41,8 @@ var (
 	routeFilter = netlink.Route{
 		Table: unix.RT_TABLE_UNSPEC,
 	}
-	routeFilterMask = netlink.RT_FILTER_TABLE
+	routeFilterMask            = netlink.RT_FILTER_TABLE
+	staticDevicesCheckInterval = 10 * time.Minute
 )
 
 type DeviceManager struct {
@@ -278,6 +281,7 @@ func (dm *DeviceManager) updateDevicesFromRoutes(l3DevOK bool, routes []netlink.
 
 	changed := false
 	for index, info := range linkInfos {
+		// TODO: 当反复重启网络设备时，此处可能使变更信息丢失
 		link, err := dm.handle.LinkByIndex(index)
 		if err != nil {
 			log.WithError(err).WithField(logfields.LinkIndex, index).
@@ -357,6 +361,10 @@ func (dm *DeviceManager) Listen(ctx context.Context) (chan []string, error) {
 	go func() {
 		log.Info("Listening for device changes")
 
+		log.WithField("interval", staticDevicesCheckInterval).Info("Start static devices check")
+		ticker := time.NewTicker(staticDevicesCheckInterval)
+		ticker.Reset(staticDevicesCheckInterval)
+
 		for {
 			devicesChanged := false
 			var devices []string
@@ -366,6 +374,7 @@ func (dm *DeviceManager) Listen(ctx context.Context) (chan []string, error) {
 				log.Debug("context closed, Listen() stopping")
 				close(closeChan)
 				close(devicesChan)
+				ticker.Stop()
 				// drain the route and link channels
 				for range routeChan {
 				}
@@ -376,7 +385,9 @@ func (dm *DeviceManager) Listen(ctx context.Context) (chan []string, error) {
 			case update := <-routeChan:
 				if update.Type == unix.RTM_NEWROUTE {
 					dm.Lock()
-					devicesChanged = dm.updateDevicesFromRoutes(l3DevOK, []netlink.Route{update.Route})
+					routesChange := dm.updateDevicesFromRoutes(l3DevOK, []netlink.Route{update.Route})
+					staticDeviceChange := dm.updateStaticDevices()
+					devicesChanged = routesChange || staticDeviceChange
 					devices = dm.getDeviceList()
 					dm.Unlock()
 				}
@@ -392,6 +403,15 @@ func (dm *DeviceManager) Listen(ctx context.Context) (chan []string, error) {
 					devices = dm.getDeviceList()
 					dm.Unlock()
 				}
+			case <-ticker.C:
+				// check device is ok and recover
+				dm.Lock()
+				devicesChanged = dm.updateStaticDevices()
+				devices = dm.getDeviceList()
+				if devicesChanged {
+					log.WithField(logfields.Devices, devices).Info("Ticker check for static devices, ")
+				}
+				dm.Unlock()
 			}
 
 			if devicesChanged {
@@ -465,6 +485,38 @@ func (dm *DeviceManager) expandDeviceWildcards(devices []string, option string) 
 	}
 	sort.Strings(expandedDevices)
 	return expandedDevices, nil
+}
+
+func (dm *DeviceManager) updateStaticDevices() bool {
+
+	allLinks, err := dm.handle.LinkList()
+	if err != nil {
+		log.WithError(err).Error("updateStaticDevices failed, skip")
+		return false
+	}
+
+	changed := false
+	filter := deviceFilter(viper.GetStringSlice(option.Devices))
+
+	for _, link := range allLinks {
+		name := link.Attrs().Name
+		isExcluded := false
+		for _, p := range excludedDevicePrefixes {
+			if strings.HasPrefix(name, p) {
+				isExcluded = true
+				break
+			}
+		}
+
+		if _, exists := dm.devices[name]; exists || !filter.match(name) || isExcluded {
+			continue
+		}
+		log.WithField("device", name).Info("Static device config lost, load again")
+		dm.devices[name] = struct{}{}
+		changed = true
+	}
+
+	return changed
 }
 
 func findK8SNodeIPLink() (netlink.Link, error) {
