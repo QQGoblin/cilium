@@ -42,7 +42,9 @@ var (
 		Table: unix.RT_TABLE_UNSPEC,
 	}
 	routeFilterMask            = netlink.RT_FILTER_TABLE
-	staticDevicesCheckInterval = 10 * time.Minute
+	staticDevicesCheckInterval = 5 * time.Minute
+	tcFilterParentIngress      = 0xfffffff2
+	tcFilterParentEgress       = 0xfffffff3
 )
 
 type DeviceManager struct {
@@ -386,7 +388,7 @@ func (dm *DeviceManager) Listen(ctx context.Context) (chan []string, error) {
 				if update.Type == unix.RTM_NEWROUTE {
 					dm.Lock()
 					routesChange := dm.updateDevicesFromRoutes(l3DevOK, []netlink.Route{update.Route})
-					staticDeviceChange := dm.updateStaticDevices()
+					staticDeviceChange := dm.updateStaticDevices(false)
 					devicesChanged = routesChange || staticDeviceChange
 					devices = dm.getDeviceList()
 					dm.Unlock()
@@ -406,7 +408,7 @@ func (dm *DeviceManager) Listen(ctx context.Context) (chan []string, error) {
 			case <-ticker.C:
 				// check device is ok and recover
 				dm.Lock()
-				devicesChanged = dm.updateStaticDevices()
+				devicesChanged = dm.updateStaticDevices(true)
 				devices = dm.getDeviceList()
 				if devicesChanged {
 					log.WithField(logfields.Devices, devices).Info("Ticker check for static devices, ")
@@ -487,7 +489,7 @@ func (dm *DeviceManager) expandDeviceWildcards(devices []string, option string) 
 	return expandedDevices, nil
 }
 
-func (dm *DeviceManager) updateStaticDevices() bool {
+func (dm *DeviceManager) updateStaticDevices(checkTC bool) bool {
 
 	allLinks, err := dm.handle.LinkList()
 	if err != nil {
@@ -497,6 +499,10 @@ func (dm *DeviceManager) updateStaticDevices() bool {
 
 	changed := false
 	filter := deviceFilter(viper.GetStringSlice(option.Devices))
+
+	if len(filter) == 0 {
+		return false
+	}
 
 	for _, link := range allLinks {
 		name := link.Attrs().Name
@@ -508,15 +514,52 @@ func (dm *DeviceManager) updateStaticDevices() bool {
 			}
 		}
 
-		if _, exists := dm.devices[name]; exists || !filter.match(name) || isExcluded {
+		if !filter.match(name) || isExcluded {
 			continue
 		}
-		log.WithField("device", name).Info("Static device config lost, load again")
-		dm.devices[name] = struct{}{}
-		changed = true
+		_, exists := dm.devices[name]
+
+		if !exists {
+			log.WithField("device", name).Info("Static device config lost, load again")
+			dm.devices[name] = struct{}{}
+			changed = true
+			continue
+		}
+
+		if checkTC && exists && dm.tcFiltersLost(link) {
+			log.WithField("device", name).Info("Static device tc filter lost, load again")
+			changed = true
+			continue
+		}
+
 	}
 
 	return changed
+}
+
+func (dm *DeviceManager) tcFiltersLost(link netlink.Link) bool {
+	allFilters := []*netlink.BpfFilter{}
+
+	for _, parent := range []uint32{uint32(tcFilterParentIngress), uint32(tcFilterParentEgress)} {
+		filters, err := netlink.FilterList(link, parent)
+		if err != nil {
+			log.WithError(err).WithField("device", link.Attrs().Name).Error("Check TC Filter lost")
+			return false
+		}
+		for _, f := range filters {
+			if bpfFilter, ok := f.(*netlink.BpfFilter); ok {
+				if strings.Contains(bpfFilter.Name, "bpf_netdev") ||
+					strings.Contains(bpfFilter.Name, "bpf_network") ||
+					strings.Contains(bpfFilter.Name, "bpf_host") ||
+					strings.Contains(bpfFilter.Name, "bpf_lxc") ||
+					strings.Contains(bpfFilter.Name, "bpf_overlay") {
+					allFilters = append(allFilters, bpfFilter)
+				}
+			}
+		}
+	}
+
+	return len(allFilters) == 0
 }
 
 func findK8SNodeIPLink() (netlink.Link, error) {
