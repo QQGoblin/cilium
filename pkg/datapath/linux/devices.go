@@ -8,9 +8,11 @@ package linux
 import (
 	"context"
 	"fmt"
+	"github.com/spf13/viper"
 	"net"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
@@ -39,7 +41,10 @@ var (
 	routeFilter = netlink.Route{
 		Table: unix.RT_TABLE_UNSPEC,
 	}
-	routeFilterMask = netlink.RT_FILTER_TABLE
+	routeFilterMask            = netlink.RT_FILTER_TABLE
+	staticDevicesCheckInterval = 30 * time.Second
+	tcFilterParentIngress      = 0xfffffff2
+	tcFilterParentEgress       = 0xfffffff3
 )
 
 type DeviceManager struct {
@@ -278,6 +283,7 @@ func (dm *DeviceManager) updateDevicesFromRoutes(l3DevOK bool, routes []netlink.
 
 	changed := false
 	for index, info := range linkInfos {
+		// TODO: 当反复重启网络设备时，此处可能使变更信息丢失
 		link, err := dm.handle.LinkByIndex(index)
 		if err != nil {
 			log.WithError(err).WithField(logfields.LinkIndex, index).
@@ -305,29 +311,6 @@ func (dm *DeviceManager) updateDevicesFromRoutes(l3DevOK bool, routes []netlink.
 // Listen starts listening to changes to network devices. When devices change the new set
 // of devices is sent on the returned channel.
 func (dm *DeviceManager) Listen(ctx context.Context) (chan []string, error) {
-	l3DevOK := supportL3Dev()
-	routeChan := make(chan netlink.RouteUpdate)
-	closeChan := make(chan struct{})
-
-	err := netlink.RouteSubscribeWithOptions(routeChan, closeChan,
-		netlink.RouteSubscribeOptions{
-			// List existing routes to make sure we did not miss changes that happened after Detect().
-			ListExisting: true,
-			Namespace:    &dm.netns,
-		})
-	if err != nil {
-		return nil, err
-	}
-
-	linkChan := make(chan netlink.LinkUpdate)
-
-	err = netlink.LinkSubscribeWithOptions(linkChan, closeChan, netlink.LinkSubscribeOptions{
-		ListExisting: false,
-		Namespace:    &dm.netns,
-	})
-	if err != nil {
-		return nil, err
-	}
 
 	devicesChan := make(chan []string, 1)
 
@@ -357,6 +340,10 @@ func (dm *DeviceManager) Listen(ctx context.Context) (chan []string, error) {
 	go func() {
 		log.Info("Listening for device changes")
 
+		log.WithField("interval", staticDevicesCheckInterval).Info("Start static devices check")
+		ticker := time.NewTicker(staticDevicesCheckInterval)
+		ticker.Reset(staticDevicesCheckInterval)
+
 		for {
 			devicesChanged := false
 			var devices []string
@@ -364,34 +351,17 @@ func (dm *DeviceManager) Listen(ctx context.Context) (chan []string, error) {
 			select {
 			case <-ctx.Done():
 				log.Debug("context closed, Listen() stopping")
-				close(closeChan)
-				close(devicesChan)
-				// drain the route and link channels
-				for range routeChan {
-				}
-				for range linkChan {
-				}
+				ticker.Stop()
 				return
-
-			case update := <-routeChan:
-				if update.Type == unix.RTM_NEWROUTE {
-					dm.Lock()
-					devicesChanged = dm.updateDevicesFromRoutes(l3DevOK, []netlink.Route{update.Route})
-					devices = dm.getDeviceList()
-					dm.Unlock()
+			case <-ticker.C:
+				// check device is ok and recover
+				dm.Lock()
+				devicesChanged = dm.checkStaticDevices() // 检查 --devices 指定的设备是否配置丢失，或者 tc filter 丢失
+				devices = dm.getDeviceList()
+				if devicesChanged {
+					log.WithField(logfields.Devices, devices).Info("Ticker check for static devices, ")
 				}
-
-			case update := <-linkChan:
-				if update.Header.Type == unix.RTM_DELLINK {
-					name := update.Attrs().Name
-					dm.Lock()
-					if _, ok := dm.devices[name]; ok {
-						delete(dm.devices, name)
-						devicesChanged = true
-					}
-					devices = dm.getDeviceList()
-					dm.Unlock()
-				}
+				dm.Unlock()
 			}
 
 			if devicesChanged {
@@ -465,6 +435,90 @@ func (dm *DeviceManager) expandDeviceWildcards(devices []string, option string) 
 	}
 	sort.Strings(expandedDevices)
 	return expandedDevices, nil
+}
+
+func (dm *DeviceManager) checkStaticDevices() bool {
+
+	// 检查以下内容：
+	//  1. 通过 --devices 配置的设备是否配置丢失
+	//  2. 已经配置的设备是否 tc filter 丢失
+
+	allLinks, err := dm.handle.LinkList()
+	if err != nil {
+		log.WithError(err).Error("checkStaticDevices failed, skip")
+		return false
+	}
+
+	changed := false
+	filter := deviceFilter(viper.GetStringSlice(option.Devices))
+
+	if len(filter) == 0 {
+		return false
+	}
+
+	for _, link := range allLinks {
+		name := link.Attrs().Name
+		isExcluded := false
+		for _, p := range excludedDevicePrefixes {
+			if strings.HasPrefix(name, p) {
+				isExcluded = true
+				break
+			}
+		}
+
+		if !filter.match(name) || isExcluded {
+			continue
+		}
+		_, exists := dm.devices[name]
+
+		// 配置丢失
+		if !exists {
+			log.WithField("device", name).
+				WithField("method", "checkStaticDevices").
+				Info("Static device config lost, load again")
+
+			dm.devices[name] = struct{}{}
+			changed = true
+			continue
+		}
+
+		// tc filter 丢失
+		if exists && dm.tcFiltersLost(link) {
+			log.WithField("device", name).
+				WithField("method", "checkStaticDevices").
+				Info("Static device tc filter lost, load again")
+			changed = true
+			continue
+		}
+
+	}
+
+	return changed
+}
+
+func (dm *DeviceManager) tcFiltersLost(link netlink.Link) bool {
+	allFilters := []*netlink.BpfFilter{}
+
+	for _, parent := range []uint32{uint32(tcFilterParentIngress), uint32(tcFilterParentEgress)} {
+		filters, err := netlink.FilterList(link, parent)
+		if err != nil {
+			log.WithError(err).WithField("device", link.Attrs().Name).Error("Check TC Filter lost")
+			return false
+		}
+		for _, f := range filters {
+			if bpfFilter, ok := f.(*netlink.BpfFilter); ok {
+				if strings.Contains(bpfFilter.Name, "bpf_netdev") ||
+					strings.Contains(bpfFilter.Name, "bpf_network") ||
+					strings.Contains(bpfFilter.Name, "bpf_host") ||
+					strings.Contains(bpfFilter.Name, "bpf_lxc") ||
+					strings.Contains(bpfFilter.Name, "bpf_overlay") {
+					allFilters = append(allFilters, bpfFilter)
+				}
+			}
+		}
+	}
+
+	return len(allFilters) == 0
 }
 
 func findK8SNodeIPLink() (netlink.Link, error) {
