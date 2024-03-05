@@ -456,6 +456,8 @@ func (dm *DeviceManager) checkStaticDevices() bool {
 		return false
 	}
 
+	currentExistDevices := make(map[string]struct{})
+
 	for _, link := range allLinks {
 		name := link.Attrs().Name
 		isExcluded := false
@@ -469,6 +471,8 @@ func (dm *DeviceManager) checkStaticDevices() bool {
 		if !filter.match(name) || isExcluded {
 			continue
 		}
+
+		currentExistDevices[name] = struct{}{}
 		_, exists := dm.devices[name]
 
 		// 配置丢失
@@ -491,6 +495,18 @@ func (dm *DeviceManager) checkStaticDevices() bool {
 			continue
 		}
 
+	}
+
+	// 判断是否有网络设备被移除
+	for name, _ := range dm.devices {
+		_, exists := currentExistDevices[name]
+		if !exists {
+			log.WithField("device", name).
+				WithField("method", "checkStaticDevices").
+				Info("Static device lost on host, load again")
+			delete(dm.devices, name)
+			changed = true
+		}
 	}
 
 	return changed
