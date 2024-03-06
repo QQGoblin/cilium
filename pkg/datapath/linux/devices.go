@@ -414,7 +414,7 @@ func (dm *DeviceManager) expandDeviceWildcards(devices []string, option string) 
 			prefix := strings.TrimRight(iface, "+")
 			for _, link := range allLinks {
 				attrs := link.Attrs()
-				if strings.HasPrefix(attrs.Name, prefix) {
+				if strings.HasPrefix(attrs.Name, prefix) && checkDeviceWithIP(attrs.Name) {
 					expandedDevicesMap[attrs.Name] = struct{}{}
 				}
 			}
@@ -456,6 +456,8 @@ func (dm *DeviceManager) checkStaticDevices() bool {
 		return false
 	}
 
+	currentExistOnHost := make(map[string]struct{})
+
 	for _, link := range allLinks {
 		name := link.Attrs().Name
 		isExcluded := false
@@ -469,6 +471,8 @@ func (dm *DeviceManager) checkStaticDevices() bool {
 		if !filter.match(name) || isExcluded {
 			continue
 		}
+
+		currentExistOnHost[name] = struct{}{}
 		_, exists := dm.devices[name]
 
 		// 配置丢失
@@ -491,6 +495,18 @@ func (dm *DeviceManager) checkStaticDevices() bool {
 			continue
 		}
 
+	}
+
+	// 判断是否有网络设备被移除
+	for name := range dm.devices {
+		_, exists := currentExistOnHost[name]
+		if !exists {
+			log.WithField("device", name).
+				WithField("method", "checkStaticDevices").
+				Info("Static device lost on host, load again")
+			delete(dm.devices, name)
+			changed = true
+		}
 	}
 
 	return changed
@@ -576,10 +592,49 @@ func (lst deviceFilter) match(dev string) bool {
 	for _, entry := range lst {
 		if strings.HasSuffix(entry, "+") {
 			prefix := strings.TrimRight(entry, "+")
-			return strings.HasPrefix(dev, prefix)
+			return strings.HasPrefix(dev, prefix) && checkDeviceWithIP(dev)
 		} else if dev == entry {
 			return true
 		}
 	}
 	return false
+}
+
+func checkDeviceWithIP(dev string) bool {
+
+	l, err := netlink.LinkByName(dev)
+	if err != nil {
+		log.WithField("device", dev).
+			WithField("method", "checkDeviceWithIP").
+			Info("checkDeviceWithIP failed, skip")
+		return false
+	}
+
+	if option.Config.EnableIPv4 && !checkLinkAddrs(l, netlink.FAMILY_V4) {
+		return false
+	}
+
+	if option.Config.EnableIPv6 && !checkLinkAddrs(l, netlink.FAMILY_V6) {
+		return false
+	}
+	return true
+}
+
+func checkLinkAddrs(l netlink.Link, family int) bool {
+	addrs, listV4err := netlink.AddrList(l, family)
+	if listV4err != nil {
+		log.WithField("device", l.Attrs().Name).
+			WithField("method", "checkDeviceWithIP").
+			WithError(listV4err).
+			Error("checkDeviceWithIP failed, skip")
+		return false
+	}
+
+	if len(addrs) == 0 {
+		log.WithField("device", l.Attrs().Name).
+			WithField("method", "checkDeviceWithIP").
+			Warning("no ip config on this device, skip")
+		return false
+	}
+	return true
 }
