@@ -56,6 +56,12 @@ retryScope:
 			if ip.IsExcluded(ipsToExclude, a.IP) {
 				continue
 			}
+
+			if (a.Flags & (unix.IFA_F_SECONDARY | unix.IFA_F_DEPRECATED)) != 0 {
+				log.WithField("address", a.IP.String()).Warn("This ip address is secondary, skip")
+				continue
+			}
+
 			if len(a.IP) >= ipLen {
 				if ip.IsPublicAddr(a.IP) {
 					ipsPublic = append(ipsPublic, a.IP)
