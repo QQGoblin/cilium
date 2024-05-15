@@ -116,7 +116,6 @@ type bpfCleanup struct {
 
 func (c bpfCleanup) whatWillBeRemoved() []string {
 	return []string{
-		fmt.Sprintf("all attached cgroup ebpf programs"),
 		fmt.Sprintf("all BPF maps in %s containing '%s' and '%s'",
 			bpf.MapPrefixPath(), ciliumLinkPrefix, tunnel.MapName),
 		fmt.Sprintf("mounted bpffs at %s", bpf.GetMapRoot()),
@@ -125,7 +124,6 @@ func (c bpfCleanup) whatWillBeRemoved() []string {
 
 func (c bpfCleanup) cleanupFuncs() []cleanupFunc {
 	return []cleanupFunc{
-		removeBPFCGroup,
 		removeAllMaps,
 	}
 }
@@ -175,7 +173,9 @@ func newCiliumCleanup(bpfOnly bool) ciliumCleanup {
 }
 
 func (c ciliumCleanup) whatWillBeRemoved() []string {
-	toBeRemoved := []string{}
+	toBeRemoved := []string{
+		fmt.Sprintf("all attached cgroup ebpf programs"),
+	}
 
 	if len(c.tcFilters) > 0 {
 		section := "tc filters\n"
@@ -238,6 +238,7 @@ func (c ciliumCleanup) cleanupFuncs() []cleanupFunc {
 	}
 
 	funcs := []cleanupFunc{
+		removeBPFCGroup,
 		cleanupTCFilters,
 	}
 	if !c.bpfOnly {
