@@ -9,7 +9,9 @@ import (
 	"context"
 	"fmt"
 	"github.com/spf13/viper"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"net"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -359,7 +361,7 @@ func (dm *DeviceManager) Listen(ctx context.Context) (chan []string, error) {
 				devicesChanged = dm.checkStaticDevices() // 检查 --devices 指定的设备是否配置丢失，或者 tc filter 丢失
 				devices = dm.getDeviceList()
 				if devicesChanged {
-					log.WithField(logfields.Devices, devices).Info("Ticker check for static devices, ")
+					log.WithField(logfields.Devices, devices).Info("Ticker check for static devices")
 				}
 				dm.Unlock()
 			}
@@ -450,7 +452,18 @@ func (dm *DeviceManager) checkStaticDevices() bool {
 	}
 
 	changed := false
-	filter := deviceFilter(viper.GetStringSlice(option.Devices))
+
+	allDeviceConfigs := sets.NewString(viper.GetStringSlice(option.Devices)...)
+
+	dynamicDeviceConfigs, err := ReadDynamicDevices()
+	if err != nil {
+		log.WithError(err).Error("read dynamic-device config failed, skip")
+	}
+	if dynamicDeviceConfigs != nil {
+		allDeviceConfigs.Insert(dynamicDeviceConfigs...)
+	}
+
+	filter := deviceFilter(allDeviceConfigs.List())
 
 	if len(filter) == 0 {
 		return false
@@ -469,6 +482,11 @@ func (dm *DeviceManager) checkStaticDevices() bool {
 		}
 
 		if !filter.match(name) || isExcluded {
+			if _, alreadyConfig := dm.devices[name]; alreadyConfig {
+				delete(dm.devices, name)
+				changed = true
+				log.WithField("name", name).Info("remove cilium_dev config")
+			}
 			continue
 		}
 
@@ -592,8 +610,12 @@ func (lst deviceFilter) match(dev string) bool {
 	for _, entry := range lst {
 		if strings.HasSuffix(entry, "+") {
 			prefix := strings.TrimRight(entry, "+")
-			return strings.HasPrefix(dev, prefix) && checkDeviceWithIP(dev)
-		} else if dev == entry {
+			if strings.HasPrefix(dev, prefix) && checkDeviceWithIP(dev) {
+				return true
+			}
+			continue
+		}
+		if dev == strings.TrimSpace(entry) {
 			return true
 		}
 	}
@@ -637,4 +659,43 @@ func checkLinkAddrs(l netlink.Link, family int) bool {
 		return false
 	}
 	return true
+}
+
+const DynamicDevicePath = "/etc/dynamic-devices"
+
+func ReadDynamicDevices() ([]string, error) {
+
+	devices := make([]string, 0)
+	pathState, err := os.Stat(DynamicDevicePath)
+	if err != nil && os.IsNotExist(err) {
+		log.WithField("DynamicDevicePath", DynamicDevicePath).
+			Info("dynamic-device config directory is not found, skip")
+		return devices, nil
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	if !pathState.IsDir() {
+		log.WithField("DynamicDevicePath", DynamicDevicePath).
+			Info("dynamic-device config is not directory, skip")
+		return devices, nil
+	}
+
+	files, err := os.ReadDir(DynamicDevicePath)
+	for _, f := range files {
+		if f.IsDir() {
+			continue
+		}
+		devices = append(devices, fmt.Sprintf("%s+", f.Name()))
+	}
+	if len(devices) > 0 {
+		log.WithField("DynamicDevicePath", DynamicDevicePath).
+			WithField("dynamic-devices", devices).
+			Debug("read dynamic-device config success")
+	}
+
+	return devices, nil
+
 }
