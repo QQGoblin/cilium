@@ -4,9 +4,14 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
+	"github.com/cilium/cilium/pkg/mountinfo"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -20,6 +25,7 @@ import (
 	"github.com/cilium/cilium/pkg/maps/tunnel"
 	"github.com/cilium/cilium/pkg/netns"
 	"github.com/cilium/cilium/pkg/option"
+	"github.com/shirou/gopsutil/v3/process"
 )
 
 // cleanupCmd represents the cleanup command
@@ -105,10 +111,12 @@ type cleanup interface {
 }
 
 // bpfCleanup represents cleanup actions for BPF state.
-type bpfCleanup struct{}
+type bpfCleanup struct {
+}
 
 func (c bpfCleanup) whatWillBeRemoved() []string {
 	return []string{
+		fmt.Sprintf("all attached cgroup ebpf programs"),
 		fmt.Sprintf("all BPF maps in %s containing '%s' and '%s'",
 			bpf.MapPrefixPath(), ciliumLinkPrefix, tunnel.MapName),
 		fmt.Sprintf("mounted bpffs at %s", bpf.GetMapRoot()),
@@ -117,6 +125,7 @@ func (c bpfCleanup) whatWillBeRemoved() []string {
 
 func (c bpfCleanup) cleanupFuncs() []cleanupFunc {
 	return []cleanupFunc{
+		removeBPFCGroup,
 		removeAllMaps,
 	}
 }
@@ -234,6 +243,7 @@ func (c ciliumCleanup) cleanupFuncs() []cleanupFunc {
 	if !c.bpfOnly {
 		funcs = append(funcs, cleanupRoutesAndLinks)
 		funcs = append(funcs, cleanupNamedNetNSs)
+		// 以下清理任务，如果 cilium 没有完全重启，此时能出现问题。
 		funcs = append(funcs, unmountCgroup)
 		funcs = append(funcs, removeDirs)
 		funcs = append(funcs, revertCNIBackup)
@@ -243,6 +253,12 @@ func (c ciliumCleanup) cleanupFuncs() []cleanupFunc {
 }
 
 func runCleanup() {
+
+	if !isProcessNotExist("/usr/local/bin/kubelet") || !isProcessNotExist("cilium-agent") {
+		fmt.Fprintf(os.Stderr, "kubelet and cilium-agent process should not be running\n")
+		os.Exit(1)
+	}
+
 	// Abort if the agent is running, err == nil is handled correctly by Stat.
 	if _, err := os.Stat(defaults.PidFilePath); !os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Agent should not be running when cleaning up\n"+
@@ -285,8 +301,11 @@ func runCleanup() {
 	// errors seen, but continue.  So that one remove function does not
 	// prevent the remaining from running.
 	for _, clean := range cleanupFuncs {
+
 		if err := clean(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+			funcValue := reflect.ValueOf(clean)
+			funcName := funcValue.Type().Name()
+			fmt.Fprintf(os.Stderr, "run cleanup func<%s> failed: %s\n", funcName, err)
 		}
 	}
 }
@@ -402,8 +421,9 @@ func removeAllMaps() error {
 }
 
 func linkMatch(linkName string) bool {
-	return strings.HasPrefix(linkName, ciliumLinkPrefix) ||
-		strings.HasPrefix(linkName, hostLinkPrefix) && len(linkName) == hostLinkLen
+	//return strings.HasPrefix(linkName, ciliumLinkPrefix) ||
+	//	strings.HasPrefix(linkName, hostLinkPrefix) && len(linkName) == hostLinkLen
+	return strings.HasPrefix(linkName, ciliumLinkPrefix) || strings.HasPrefix(linkName, hostLinkPrefix)
 }
 
 func findRoutesAndLinks() (map[int]netlink.Route, map[int]netlink.Link, error) {
@@ -511,4 +531,84 @@ func removeTCFilters(linkAndFilters map[string][]*netlink.BpfFilter) error {
 	}
 
 	return nil
+}
+
+type CGroupBPF struct {
+	ID          int    `json:"id"`
+	AttachType  string `json:"attach_type"`
+	AttachFlags string `json:"attach_flags"`
+	Name        string `json:"name"`
+}
+
+func isCGroupRootMounted() error {
+
+	mountPoints, err := mountinfo.GetMountInfo()
+	if err != nil {
+		return err
+	}
+
+	for _, m := range mountPoints {
+		if m.MountPoint == defaults.DefaultCgroupRoot && m.FilesystemType == "cgroup2" {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("%s is not mount as cgroup2", defaults.DefaultCgroupRoot)
+
+}
+
+func removeBPFCGroup() error {
+
+	if err := isCGroupRootMounted(); err != nil {
+		fmt.Fprintf(os.Stderr, "skip remove bpf cgroup programs: %v\n", err)
+		return nil
+	}
+
+	out, err := exec.Command("bpftool", "cgroup", "show", defaults.DefaultCgroupRoot, "-j").CombinedOutput()
+	if err != nil {
+		return err
+	}
+
+	if strings.TrimSpace(string(out)) == "" {
+		return nil
+	}
+
+	cgroups := make([]CGroupBPF, 0)
+
+	if err := json.Unmarshal(out, &cgroups); err != nil {
+		return err
+	}
+
+	for _, c := range cgroups {
+		err = exec.Command("bpftool", "cgroup", "detach", defaults.DefaultCgroupRoot, c.AttachType, "id", strconv.Itoa(c.ID)).Run()
+		if err != nil {
+			return err
+		}
+		fmt.Printf("removed cgroup [%s] progs %s[%d]\n", c.AttachType, c.Name, c.ID)
+	}
+
+	return nil
+}
+
+func isProcessNotExist(name string) bool {
+
+	all, err := process.Processes()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "read processes failed: %v", err)
+		return false
+	}
+
+	for _, p := range all {
+		pname, err2 := p.Name()
+		if err2 != nil {
+			fmt.Fprintf(os.Stderr, "get process name failed, skip: %v", err2)
+			continue
+		}
+		if pname == name {
+			return false
+		}
+	}
+
+	return true
+
 }
