@@ -34,3 +34,4 @@ echo "wrote ${CNI_DIR}/bin/${BIN_NAME}"
 
 echo "Installing cilium cli..."
 /bin/cp /usr/bin/cilium "${CNI_DIR}/bin/" || true
+/bin/cp /usr/local/bin/bpftool "${CNI_DIR}/bin/" || true
