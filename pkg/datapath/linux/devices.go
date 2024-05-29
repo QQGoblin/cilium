@@ -469,7 +469,7 @@ func (dm *DeviceManager) checkStaticDevices() bool {
 		return false
 	}
 
-	currentExistOnHost := make(map[string]struct{})
+	currentExistOnHost := make(map[string]netlink.Link)
 
 	for _, link := range allLinks {
 		name := link.Attrs().Name
@@ -490,7 +490,7 @@ func (dm *DeviceManager) checkStaticDevices() bool {
 			continue
 		}
 
-		currentExistOnHost[name] = struct{}{}
+		currentExistOnHost[name] = link
 		_, exists := dm.devices[name]
 
 		// 配置丢失
@@ -525,6 +525,46 @@ func (dm *DeviceManager) checkStaticDevices() bool {
 			delete(dm.devices, name)
 			changed = true
 		}
+	}
+
+	// 判断 IP地址是否变化
+	addrWithDevices := node.GetMasqIPv4AddrsWithDevices()
+	for name := range dm.devices {
+		oldAddr, ipExists := addrWithDevices[name]
+		if !ipExists {
+			log.WithField("device", name).
+				WithField("method", "checkStaticDevices").
+				Warning("Can't get old address, skip")
+			continue
+		}
+
+		// TODO: 暂时只考虑 IPV4
+		addrs, listV4err := netlink.AddrList(currentExistOnHost[name], netlink.FAMILY_V4)
+		if listV4err != nil {
+			log.WithField("device", name).
+				WithField("method", "checkStaticDevices").
+				Warning("Can't list address")
+			continue
+		}
+		addrChange := true
+		for _, addr := range addrs {
+			// 考虑主 IP 变化的情况
+			if (addr.Flags & (unix.IFA_F_SECONDARY | unix.IFA_F_DEPRECATED)) != 0 {
+				continue
+			}
+			if oldAddr.Equal(addr.IP) {
+				addrChange = false
+				break
+			}
+		}
+		if addrChange {
+			log.WithField("device", name).
+				WithField("old", oldAddr).WithField("current", addrs).
+				WithField("method", "checkStaticDevices").
+				Warning("Address changed")
+			changed = true
+		}
+
 	}
 
 	return changed
