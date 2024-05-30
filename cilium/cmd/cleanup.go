@@ -59,6 +59,9 @@ const (
 
 	tcFilterParentIngress = 0xfffffff2
 	tcFilterParentEgress  = 0xfffffff3
+
+	ciliumBPFtool  = "/opt/cni/bin/bpftool"
+	defaultBPFtool = "/sbin/bpftool"
 )
 
 const (
@@ -116,7 +119,6 @@ type bpfCleanup struct {
 
 func (c bpfCleanup) whatWillBeRemoved() []string {
 	return []string{
-		fmt.Sprintf("all attached cgroup ebpf programs"),
 		fmt.Sprintf("all BPF maps in %s containing '%s' and '%s'",
 			bpf.MapPrefixPath(), ciliumLinkPrefix, tunnel.MapName),
 		fmt.Sprintf("mounted bpffs at %s", bpf.GetMapRoot()),
@@ -125,7 +127,6 @@ func (c bpfCleanup) whatWillBeRemoved() []string {
 
 func (c bpfCleanup) cleanupFuncs() []cleanupFunc {
 	return []cleanupFunc{
-		removeBPFCGroup,
 		removeAllMaps,
 	}
 }
@@ -175,7 +176,9 @@ func newCiliumCleanup(bpfOnly bool) ciliumCleanup {
 }
 
 func (c ciliumCleanup) whatWillBeRemoved() []string {
-	toBeRemoved := []string{}
+	toBeRemoved := []string{
+		fmt.Sprintf("all attached cgroup ebpf programs"),
+	}
 
 	if len(c.tcFilters) > 0 {
 		section := "tc filters\n"
@@ -238,6 +241,7 @@ func (c ciliumCleanup) cleanupFuncs() []cleanupFunc {
 	}
 
 	funcs := []cleanupFunc{
+		removeBPFCGroup,
 		cleanupTCFilters,
 	}
 	if !c.bpfOnly {
@@ -564,7 +568,19 @@ func removeBPFCGroup() error {
 		return nil
 	}
 
-	out, err := exec.Command("bpftool", "cgroup", "show", defaults.DefaultCgroupRoot, "-j").CombinedOutput()
+	bpftool := defaultBPFtool
+
+	if _, err := os.Stat(bpftool); err != nil {
+		if os.IsNotExist(err) {
+			log.Infof("%s in not install on host, using %s which is copy from container", defaultBPFtool, ciliumBPFtool)
+			bpftool = ciliumBPFtool
+		} else {
+			return err
+		}
+
+	}
+
+	out, err := exec.Command(bpftool, "cgroup", "show", defaults.DefaultCgroupRoot, "-j").CombinedOutput()
 	if err != nil {
 		return err
 	}
@@ -580,7 +596,7 @@ func removeBPFCGroup() error {
 	}
 
 	for _, c := range cgroups {
-		err = exec.Command("bpftool", "cgroup", "detach", defaults.DefaultCgroupRoot, c.AttachType, "id", strconv.Itoa(c.ID)).Run()
+		err = exec.Command(bpftool, "cgroup", "detach", defaults.DefaultCgroupRoot, c.AttachType, "id", strconv.Itoa(c.ID)).Run()
 		if err != nil {
 			return err
 		}
