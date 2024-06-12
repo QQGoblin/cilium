@@ -1151,6 +1151,9 @@ func initializeFlags() {
 	flags.MarkHidden(option.EnableStaleCiliumEndpointCleanup)
 	option.BindEnv(option.EnableStaleCiliumEndpointCleanup)
 
+	flags.Bool(option.DisableNatResvPort, false, "Disable use resvport for snat")
+	option.BindEnv(option.DisableNatResvPort)
+
 	viper.BindPFlags(flags)
 }
 

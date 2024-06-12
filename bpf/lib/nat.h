@@ -61,8 +61,13 @@ static __always_inline __be16 __snat_clamp_port_range(__u16 start, __u16 end,
 static __always_inline __maybe_unused __be16
 __snat_try_keep_port(__u16 start, __u16 end, __u16 val)
 {
+#if defined(SUNRPC_MIN_RESVPORT) && defined(SUNRPC_MAX_RESVPORT)
 	return ((val >= SUNRPC_MIN_RESVPORT && val <= SUNRPC_MAX_RESVPORT) || (val >= start && val <= end)) ? val :
 	       __snat_clamp_port_range(start, end, (__u16)get_prandom_u32());
+#else
+	return (val >= start && val <= end) ? val :
+	       __snat_clamp_port_range(start, end, (__u16)get_prandom_u32());
+#endif
 }
 
 static __always_inline __maybe_unused void *
@@ -250,12 +255,15 @@ static __always_inline int snat_v4_new_mapping(struct __ctx_buff *ctx,
 			if (!ret)
 				break;
 		}
+#if defined(SUNRPC_MIN_RESVPORT) && defined(SUNRPC_MAX_RESVPORT)
         if (port >= SUNRPC_MIN_RESVPORT && port <= SUNRPC_MAX_RESVPORT) {
             port = __snat_clamp_port_range(SUNRPC_MIN_RESVPORT,
                             SUNRPC_MAX_RESVPORT,
                             retries ? port + 1 :
                             (__u16)get_prandom_u32());
-        } else {
+        } else
+#endif
+        {
         	port = __snat_clamp_port_range(target->min_port,
                             target->max_port,
                             retries ? port + 1 :
@@ -471,8 +479,10 @@ snat_v4_can_skip(const struct ipv4_nat_target *target,
 	      sport < NAT_MIN_EGRESS) ||
 	     icmp_echoreply))
 		return true;
+#if defined(SUNRPC_MIN_RESVPORT) && defined(SUNRPC_MAX_RESVPORT)
 	if (dir == NAT_DIR_INGRESS && (dport >= SUNRPC_MIN_RESVPORT && dport <= SUNRPC_MAX_RESVPORT))
     	return false;
+#endif
 	if (dir == NAT_DIR_INGRESS && (dport < target->min_port || dport > target->max_port))
 		return true;
 

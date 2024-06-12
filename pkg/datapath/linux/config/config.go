@@ -407,21 +407,22 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *datapath.LocalNodeC
 		cDefinesMap["NODEPORT_PORT_MIN_NAT"] = fmt.Sprintf("%d", option.Config.NodePortMax+1)
 		cDefinesMap["NODEPORT_PORT_MAX_NAT"] = "65535"
 
-		// 获取 /sys/module/sunrpc/parameters/min_resvport 和 /sys/module/sunrpc/parameters/max_resvport
-		// 自动覆盖 bpf/node_config.h 中的默认配置
+		if !option.Config.DisableNatResvPort {
+			// 获取 /sys/module/sunrpc/parameters/min_resvport 和 /sys/module/sunrpc/parameters/max_resvport
+			// 自动覆盖 bpf/node_config.h 中的默认配置
+			minResvport, err := os.ReadFile("/sys/module/sunrpc/parameters/min_resvport")
+			if err != nil {
+				return errors.Wrap(err, "read sunrpc.min_resvport")
+			}
 
-		minResvport, err := os.ReadFile("/sys/module/sunrpc/parameters/min_resvport")
-		if err != nil {
-			return errors.Wrap(err, "read sunrpc.min_resvport")
+			maxResvport, err := os.ReadFile("/sys/module/sunrpc/parameters/max_resvport")
+			if err != nil {
+				return errors.Wrap(err, "read sunrpc.max_resvport")
+			}
+
+			cDefinesMap["SUNRPC_MIN_RESVPORT"] = strings.TrimRight(string(minResvport), "\n")
+			cDefinesMap["SUNRPC_MAX_RESVPORT"] = strings.TrimRight(string(maxResvport), "\n")
 		}
-
-		maxResvport, err := os.ReadFile("/sys/module/sunrpc/parameters/max_resvport")
-		if err != nil {
-			return errors.Wrap(err, "read sunrpc.max_resvport")
-		}
-
-		cDefinesMap["SUNRPC_MIN_RESVPORT"] = strings.TrimRight(string(minResvport), "\n")
-		cDefinesMap["SUNRPC_MAX_RESVPORT"] = strings.TrimRight(string(maxResvport), "\n")
 
 		macByIfIndexMacro, isL3DevMacro, err := devMacros()
 		if err != nil {

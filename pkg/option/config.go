@@ -1108,6 +1108,8 @@ const (
 	// EnableStaleCiliumEndpointCleanup sets whether Cilium should perform cleanup of
 	// stale CiliumEndpoints during init.
 	EnableStaleCiliumEndpointCleanup = "enable-stale-cilium-endpoint-cleanup"
+
+	DisableNatResvPort = "disable-nat-resv-port"
 )
 
 // Default string arguments
@@ -2270,6 +2272,8 @@ type DaemonConfig struct {
 	// This will attempt to remove local CiliumEndpoints that are not managed by Cilium
 	// following Endpoint restoration.
 	EnableStaleCiliumEndpointCleanup bool
+
+	DisableNatResvPort bool
 }
 
 var (
@@ -3264,6 +3268,7 @@ func (c *DaemonConfig) Populate() {
 	c.BypassIPAvailabilityUponRestore = viper.GetBool(BypassIPAvailabilityUponRestore)
 	c.EnableK8sTerminatingEndpoint = viper.GetBool(EnableK8sTerminatingEndpoint)
 	c.EnableStaleCiliumEndpointCleanup = viper.GetBool(EnableStaleCiliumEndpointCleanup)
+	c.DisableNatResvPort = viper.GetBool(DisableNatResvPort)
 
 	// Disable Envoy version check if L7 proxy is disabled.
 	c.DisableEnvoyVersionCheck = viper.GetBool(DisableEnvoyVersionCheck)
