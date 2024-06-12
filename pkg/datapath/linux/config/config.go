@@ -9,6 +9,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/cilium/cilium/pkg/sysctl"
+	"github.com/pkg/errors"
 	"io"
 	"net"
 	"sort"
@@ -403,6 +405,21 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *datapath.LocalNodeC
 		cDefinesMap["NODEPORT_PORT_MAX"] = fmt.Sprintf("%d", option.Config.NodePortMax)
 		cDefinesMap["NODEPORT_PORT_MIN_NAT"] = fmt.Sprintf("%d", option.Config.NodePortMax+1)
 		cDefinesMap["NODEPORT_PORT_MAX_NAT"] = "65535"
+
+		// 获取 /sys/module/sunrpc/parameters/min_resvport 和 /sys/module/sunrpc/parameters/max_resvport
+		// 自动覆盖 bpf/node_config.h 中的默认配置
+		minResvport, err := sysctl.Read("sunrpc.min_resvport")
+		if err != nil {
+			return errors.Wrap(err, "read sunrpc.min_resvport")
+		}
+
+		maxResvport, err := sysctl.Read("sunrpc.max_resvport")
+		if err != nil {
+			return errors.Wrap(err, "read sunrpc.max_resvport")
+		}
+
+		cDefinesMap["SUNRPC_MIN_RESVPORT"] = minResvport
+		cDefinesMap["SUNRPC_MAX_RESVPORT"] = maxResvport
 
 		macByIfIndexMacro, isL3DevMacro, err := devMacros()
 		if err != nil {
