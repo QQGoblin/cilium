@@ -61,6 +61,13 @@ import (
 
 var log = logging.DefaultLogger.WithField(logfields.LogSubsys, "datapath-linux-config")
 
+const (
+	MinResvPortPath        = "/sys/module/sunrpc/parameters/min_resvport"
+	MaxResvPortPath        = "/sys/module/sunrpc/parameters/max_resvport"
+	DefaultMinResvPortPath = "665"
+	DefaultMaxResvPortPath = "1023"
+)
+
 // HeaderfileWriter is a wrapper type which implements datapath.ConfigWriter.
 // It manages writing of configuration of datapath program headerfiles.
 type HeaderfileWriter struct{}
@@ -410,14 +417,22 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *datapath.LocalNodeC
 		if !option.Config.DisableNatResvPort {
 			// 获取 /sys/module/sunrpc/parameters/min_resvport 和 /sys/module/sunrpc/parameters/max_resvport
 			// 自动覆盖 bpf/node_config.h 中的默认配置
-			minResvport, err := os.ReadFile("/sys/module/sunrpc/parameters/min_resvport")
+			minResvport, err := os.ReadFile(MinResvPortPath)
 			if err != nil {
-				return errors.Wrap(err, "read sunrpc.min_resvport")
+				if !os.IsNotExist(err) {
+					return errors.Wrap(err, "read sunrpc.min_resvport")
+				}
+				log.Infof("%s is not found, use default %s", MinResvPortPath, DefaultMinResvPortPath)
+				minResvport = []byte(DefaultMinResvPortPath)
 			}
 
-			maxResvport, err := os.ReadFile("/sys/module/sunrpc/parameters/max_resvport")
+			maxResvport, err := os.ReadFile(MaxResvPortPath)
 			if err != nil {
-				return errors.Wrap(err, "read sunrpc.max_resvport")
+				if !os.IsNotExist(err) {
+					return errors.Wrap(err, "read sunrpc.max_resvport")
+				}
+				log.Infof("%s is not found, use default %s", MaxResvPortPath, DefaultMaxResvPortPath)
+				minResvport = []byte(DefaultMaxResvPortPath)
 			}
 
 			cDefinesMap["SUNRPC_MIN_RESVPORT"] = strings.TrimRight(string(minResvport), "\n")
