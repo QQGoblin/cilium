@@ -432,7 +432,7 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *datapath.LocalNodeC
 					return errors.Wrap(err, "read sunrpc.max_resvport")
 				}
 				log.Infof("%s is not found, use default %s", MaxResvPortPath, DefaultMaxResvPortPath)
-				minResvport = []byte(DefaultMaxResvPortPath)
+				maxResvport = []byte(DefaultMaxResvPortPath)
 			}
 
 			cDefinesMap["SUNRPC_MIN_RESVPORT"] = strings.TrimRight(string(minResvport), "\n")
