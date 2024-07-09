@@ -54,6 +54,9 @@ var (
 	Backend6MapV3 *bpf.Map
 	// RevNat6Map is the IPv6 LB reverse NAT BPF map.
 	RevNat6Map *bpf.Map
+
+	// SockRevNat4Map is the IPv4 LB sock reverse NAT BPF map.
+	SockRevNat6Map *bpf.Map
 )
 
 // The compile-time check for whether the structs implement the interfaces
@@ -424,10 +427,10 @@ func (b *Backend6) GetValue() BackendValue { return b.Value }
 // +k8s:deepcopy-gen=true
 // +k8s:deepcopy-gen:interfaces=github.com/cilium/cilium/pkg/bpf.MapKey
 type SockRevNat6Key struct {
-	cookie  uint64     `align:"cookie"`
-	address types.IPv6 `align:"address"`
-	port    int16      `align:"port"`
-	pad     int16      `align:"pad"`
+	Cookie  uint64     `align:"cookie"`
+	Address types.IPv6 `align:"address"`
+	Port    int16      `align:"port"`
+	Pad     int16      `align:"pad"`
 }
 
 // SizeofSockRevNat6Key is the size of type SockRevNat6Key.
@@ -437,13 +440,26 @@ const SizeofSockRevNat6Key = int(unsafe.Sizeof(SockRevNat6Key{}))
 // +k8s:deepcopy-gen=true
 // +k8s:deepcopy-gen:interfaces=github.com/cilium/cilium/pkg/bpf.MapValue
 type SockRevNat6Value struct {
-	address     types.IPv6 `align:"address"`
-	port        int16      `align:"port"`
-	revNatIndex uint16     `align:"rev_nat_index"`
+	Address     types.IPv6 `align:"address"`
+	Port        int16      `align:"port"`
+	RevNatIndex uint16     `align:"rev_nat_index"`
 }
 
 // SizeofSockRevNat6Value is the size of type SockRevNat6Value.
 const SizeofSockRevNat6Value = int(unsafe.Sizeof(SockRevNat6Value{}))
+
+func (k *SockRevNat6Key) Map() *bpf.Map { return SockRevNat6Map }
+
+func NewSockRevNat6Key(cookie uint64, addr net.IP, port uint16) *SockRevNat6Key {
+	var key SockRevNat6Key
+
+	key.Cookie = cookie
+	key.Port = int16(byteorder.NetworkToHost16(port))
+	ipv6Array := addr.To16()
+	copy(key.Address[:], ipv6Array[:])
+
+	return &key
+}
 
 // GetKeyPtr returns the unsafe pointer to the BPF key
 func (k *SockRevNat6Key) GetKeyPtr() unsafe.Pointer { return unsafe.Pointer(k) }
@@ -453,12 +469,12 @@ func (v *SockRevNat6Value) GetValuePtr() unsafe.Pointer { return unsafe.Pointer(
 
 // String converts the key into a human readable string format.
 func (k *SockRevNat6Key) String() string {
-	return fmt.Sprintf("[%s]:%d, %d", k.address, k.port, k.cookie)
+	return fmt.Sprintf("[%s]:%d, %d", k.Address, k.Port, k.Cookie)
 }
 
 // String converts the value into a human readable string format.
 func (v *SockRevNat6Value) String() string {
-	return fmt.Sprintf("[%s]:%d, %d", v.address, v.port, v.revNatIndex)
+	return fmt.Sprintf("[%s]:%d, %d", v.Address, v.Port, v.RevNatIndex)
 }
 
 // NewValue returns a new empty instance of the structure representing the BPF
@@ -467,7 +483,7 @@ func (k SockRevNat6Key) NewValue() bpf.MapValue { return &SockRevNat6Value{} }
 
 // CreateSockRevNat6Map creates the reverse NAT sock map.
 func CreateSockRevNat6Map() error {
-	sockRevNat6Map := bpf.NewMap(SockRevNat6MapName,
+	SockRevNat6Map = bpf.NewMap(SockRevNat6MapName,
 		bpf.MapTypeLRUHash,
 		&SockRevNat6Key{},
 		int(unsafe.Sizeof(SockRevNat6Key{})),
@@ -478,6 +494,6 @@ func CreateSockRevNat6Map() error {
 		0,
 		bpf.ConvertKeyValue,
 	).WithPressureMetric()
-	_, err := sockRevNat6Map.Create()
+	_, err := SockRevNat6Map.OpenOrCreate()
 	return err
 }
