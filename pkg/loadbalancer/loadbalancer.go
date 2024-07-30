@@ -405,7 +405,6 @@ func IsValidStateTransition(old, new BackendState) bool {
 
 	switch old {
 	case BackendStateActive:
-		return false
 	// 允许通过 cilium-api 将 terminating 状态的 Pod 改为 Active 状态
 	case BackendStateTerminating:
 		return new == BackendStateActive
