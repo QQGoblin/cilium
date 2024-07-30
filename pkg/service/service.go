@@ -1692,6 +1692,11 @@ func (s *Service) updateBackendsCacheLocked(svc *svcInfo, backends []lb.Backend)
 				switch {
 				// BE 实际状态为不是 Terminating , 期望将它更新为 Terminating 状态
 				case backends[i].State == lb.BackendStateTerminating && b.State != lb.BackendStateTerminating:
+					b.State = backends[i].State
+					if err := s.lbmap.UpdateBackendWithState(backends[i]); err != nil {
+						return nil, nil, nil, fmt.Errorf("failed to update backend %+v %w",
+							backends[i], err)
+					}
 				// BE 实际状态为不是 Terminating , 期望将它更新为 Active 状态
 				// 参考：https://github.com/cilium/cilium/issues/28094
 				case backends[i].State == lb.BackendStateActive && b.State == lb.BackendStateTerminating:
