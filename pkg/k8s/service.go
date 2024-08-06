@@ -10,7 +10,9 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/cilium/cilium/pkg/node"
 	"github.com/sirupsen/logrus"
+	"github.com/spf13/viper"
 	v1 "k8s.io/api/core/v1"
 
 	"github.com/cilium/cilium/pkg/annotation"
@@ -222,10 +224,21 @@ func ParseService(svc *slim_corev1.Service, nodeAddressing types.NodeAddressing)
 						make(map[string]*loadbalancer.L3n4AddrID)
 				}
 
+				staticDeviceFilter := viper.GetStringSlice(option.Devices)
+
 				if option.Config.EnableIPv4 &&
 					utils.GetClusterIPByFamily(slim_corev1.IPv4Protocol, svc) != "" {
 
-					for _, ip := range nodeAddressing.IPv4().LoadBalancerNodeAddresses() {
+					nodePortAddresses := []net.IP{net.IPv4zero}
+					for device, ip := range node.GetNodePortIPv4AddrsWithDevices() {
+						if !staticDevices(device, staticDeviceFilter) {
+							log.WithFields(logrus.Fields{"device": device, "address": ip}).Debug("Skip dynamic device as Service Nodeport")
+							continue
+						}
+						nodePortAddresses = append(nodePortAddresses, ip)
+					}
+
+					for _, ip := range nodePortAddresses {
 						nodePortFE := loadbalancer.NewL3n4AddrID(proto, ip, port,
 							loadbalancer.ScopeExternal, id)
 						svcInfo.NodePorts[portName][nodePortFE.String()] = nodePortFE
@@ -234,7 +247,16 @@ func ParseService(svc *slim_corev1.Service, nodeAddressing types.NodeAddressing)
 				if option.Config.EnableIPv6 &&
 					utils.GetClusterIPByFamily(slim_corev1.IPv6Protocol, svc) != "" {
 
-					for _, ip := range nodeAddressing.IPv6().LoadBalancerNodeAddresses() {
+					nodePortAddresses := []net.IP{net.IPv6zero}
+					for device, ip := range node.GetMasqIPv4AddrsWithDevices() {
+						if !staticDevices(device, staticDeviceFilter) {
+							log.WithFields(logrus.Fields{"device": device, "address": ip}).Debug("Skip dynamic device as Service Nodeport")
+							continue
+						}
+						nodePortAddresses = append(nodePortAddresses, ip)
+					}
+
+					for _, ip := range nodePortAddresses {
 						nodePortFE := loadbalancer.NewL3n4AddrID(proto, ip, port,
 							loadbalancer.ScopeExternal, id)
 						svcInfo.NodePorts[portName][nodePortFE.String()] = nodePortFE
@@ -706,4 +728,25 @@ func CreateCustomDialer(b ServiceIPGetter, log *logrus.Entry) func(ctx context.C
 		}
 		return net.Dial("tcp", s)
 	}
+}
+
+func staticDevices(device string, filter []string) bool {
+
+	if len(filter) == 0 {
+		return false
+	}
+	for _, entry := range filter {
+		if strings.HasSuffix(entry, "+") {
+			prefix := strings.TrimRight(entry, "+")
+			if strings.HasPrefix(device, prefix) {
+				return true
+			}
+			continue
+		}
+		if device == strings.TrimSpace(entry) {
+			return true
+		}
+	}
+
+	return false
 }
