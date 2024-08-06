@@ -854,9 +854,16 @@ func (s *Service) UpdateBackendsState(backends []lb.Backend) error {
 			// possible to receive an API call for a backend that's already deleted.
 			continue
 		}
-		if be.State == updatedB.State {
-			continue
-		}
+
+		// 强制执行一次 backend 状态的更新，确保以下状态一致：
+		// 1. updatedB.State
+		// 2. s.backendByHash
+		// 3. ebpfMap
+
+		//if be.State == updatedB.State {
+		//	continue
+		//}
+
 		if !lb.IsValidStateTransition(be.State, updatedB.State) {
 			currentState, _ := be.State.String()
 			newState, _ := updatedB.State.String()
@@ -1691,18 +1698,27 @@ func (s *Service) updateBackendsCacheLocked(svc *svcInfo, backends []lb.Backend)
 				// update in this case is for the terminating state. All other state
 				// updates happen via the API (UpdateBackendState) in which case we need
 				// to set the backend state to the saved state.
-				if backends[i].State == lb.BackendStateTerminating &&
-					b.State != lb.BackendStateTerminating {
+				switch {
+				// BE 实际状态为不是 Terminating , 期望将它更新为 Terminating 状态
+				case backends[i].State == lb.BackendStateTerminating && b.State != lb.BackendStateTerminating:
 					b.State = backends[i].State
-					// Update the persisted backend state in BPF maps.
 					if err := s.lbmap.UpdateBackendWithState(backends[i]); err != nil {
 						return nil, nil, nil, fmt.Errorf("failed to update backend %+v %w",
 							backends[i], err)
 					}
-				} else {
+				// BE 实际状态为不是 Terminating , 期望将它更新为 Active 状态
+				// 参考：https://github.com/cilium/cilium/issues/28094
+				case backends[i].State == lb.BackendStateActive && b.State == lb.BackendStateTerminating:
+					b.State = backends[i].State
+					if err := s.lbmap.UpdateBackendWithState(backends[i]); err != nil {
+						return nil, nil, nil, fmt.Errorf("failed to update backend %+v %w",
+							backends[i], err)
+					}
+				default:
 					// Set the backend state to the saved state.
 					backends[i].State = b.State
 				}
+
 			}
 		}
 	}
