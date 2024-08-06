@@ -12,7 +12,6 @@ import (
 
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/sirupsen/logrus"
-	"github.com/spf13/viper"
 	v1 "k8s.io/api/core/v1"
 
 	"github.com/cilium/cilium/pkg/annotation"
@@ -25,6 +24,7 @@ import (
 	"github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/option"
+	ciliumService "github.com/cilium/cilium/pkg/service"
 	serviceStore "github.com/cilium/cilium/pkg/service/store"
 )
 
@@ -224,19 +224,11 @@ func ParseService(svc *slim_corev1.Service, nodeAddressing types.NodeAddressing)
 						make(map[string]*loadbalancer.L3n4AddrID)
 				}
 
-				staticDeviceFilter := viper.GetStringSlice(option.Devices)
-
 				if option.Config.EnableIPv4 &&
 					utils.GetClusterIPByFamily(slim_corev1.IPv4Protocol, svc) != "" {
 
-					nodePortAddresses := []net.IP{net.IPv4zero}
-					for device, ip := range node.GetNodePortIPv4AddrsWithDevices() {
-						if !staticDevices(device, staticDeviceFilter) {
-							log.WithFields(logrus.Fields{"device": device, "address": ip}).Debug("Skip dynamic device as Service Nodeport")
-							continue
-						}
-						nodePortAddresses = append(nodePortAddresses, ip)
-					}
+					nodePortAddresses := ciliumService.StaticNodePortAddresses(node.GetNodePortIPv4AddrsWithDevices())
+					nodePortAddresses = append(nodePortAddresses, net.IPv4zero)
 
 					for _, ip := range nodePortAddresses {
 						nodePortFE := loadbalancer.NewL3n4AddrID(proto, ip, port,
@@ -247,14 +239,8 @@ func ParseService(svc *slim_corev1.Service, nodeAddressing types.NodeAddressing)
 				if option.Config.EnableIPv6 &&
 					utils.GetClusterIPByFamily(slim_corev1.IPv6Protocol, svc) != "" {
 
-					nodePortAddresses := []net.IP{net.IPv6zero}
-					for device, ip := range node.GetMasqIPv4AddrsWithDevices() {
-						if !staticDevices(device, staticDeviceFilter) {
-							log.WithFields(logrus.Fields{"device": device, "address": ip}).Debug("Skip dynamic device as Service Nodeport")
-							continue
-						}
-						nodePortAddresses = append(nodePortAddresses, ip)
-					}
+					nodePortAddresses := ciliumService.StaticNodePortAddresses(node.GetNodePortIPv6AddrsWithDevices())
+					nodePortAddresses = append(nodePortAddresses, net.IPv6zero)
 
 					for _, ip := range nodePortAddresses {
 						nodePortFE := loadbalancer.NewL3n4AddrID(proto, ip, port,
@@ -728,25 +714,4 @@ func CreateCustomDialer(b ServiceIPGetter, log *logrus.Entry) func(ctx context.C
 		}
 		return net.Dial("tcp", s)
 	}
-}
-
-func staticDevices(device string, filter []string) bool {
-
-	if len(filter) == 0 {
-		return false
-	}
-	for _, entry := range filter {
-		if strings.HasSuffix(entry, "+") {
-			prefix := strings.TrimRight(entry, "+")
-			if strings.HasPrefix(device, prefix) {
-				return true
-			}
-			continue
-		}
-		if device == strings.TrimSpace(entry) {
-			return true
-		}
-	}
-
-	return false
 }

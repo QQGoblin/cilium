@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -24,9 +25,11 @@ import (
 	"github.com/cilium/cilium/pkg/maps/lbmap"
 	"github.com/cilium/cilium/pkg/metrics"
 	monitorAPI "github.com/cilium/cilium/pkg/monitor/api"
+	"github.com/cilium/cilium/pkg/node"
 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/service/healthserver"
+	"github.com/spf13/viper"
 )
 
 const anyPort = "*"
@@ -1813,12 +1816,18 @@ func (s *Service) SyncServicesOnDeviceChange(nodeAddressing types.NodeAddressing
 	frontendAddrs := make(map[string]net.IP)
 
 	if option.Config.EnableIPv4 {
-		for _, ip := range nodeAddressing.IPv4().LoadBalancerNodeAddresses() {
+		//for _, ip := range nodeAddressing.IPv4().LoadBalancerNodeAddresses() {
+		//	frontendAddrs[ip.String()] = ip
+		//}
+		for _, ip := range StaticNodePortAddresses(node.GetNodePortIPv4AddrsWithDevices()) {
 			frontendAddrs[ip.String()] = ip
 		}
 	}
 	if option.Config.EnableIPv6 {
-		for _, ip := range nodeAddressing.IPv6().LoadBalancerNodeAddresses() {
+		//for _, ip := range nodeAddressing.IPv6().LoadBalancerNodeAddresses() {
+		//	frontendAddrs[ip.String()] = ip
+		//}
+		for _, ip := range StaticNodePortAddresses(node.GetNodePortIPv4AddrsWithDevices()) {
 			frontendAddrs[ip.String()] = ip
 		}
 	}
@@ -1881,4 +1890,45 @@ func (s *Service) SyncServicesOnDeviceChange(nodeAddressing types.NodeAddressing
 			}
 		}
 	}
+}
+
+func StaticNodePortAddresses(nodePortIPAddrsWithDevices map[string]net.IP) []net.IP {
+
+	nodePortAddresses := make([]net.IP, 0)
+
+	if nodePortIPAddrsWithDevices == nil {
+		return nodePortAddresses
+	}
+
+	for device, ip := range nodePortIPAddrsWithDevices {
+		if !filterStaticDevices(device) {
+			log.WithFields(logrus.Fields{"device": device, "address": ip}).Info("Skip dynamic device as Service Nodeport")
+			continue
+		}
+		nodePortAddresses = append(nodePortAddresses, ip)
+	}
+	return nodePortAddresses
+}
+
+func filterStaticDevices(device string) bool {
+
+	filter := viper.GetStringSlice(option.Devices)
+
+	if len(filter) == 0 {
+		return false
+	}
+	for _, entry := range filter {
+		if strings.HasSuffix(entry, "+") {
+			prefix := strings.TrimRight(entry, "+")
+			if strings.HasPrefix(device, prefix) {
+				return true
+			}
+			continue
+		}
+		if device == strings.TrimSpace(entry) {
+			return true
+		}
+	}
+
+	return false
 }
