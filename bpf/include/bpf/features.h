@@ -36,4 +36,8 @@
 # define BPF_HAVE_SOCKET_LOOKUP 1
 #endif
 
+#if HAVE_PROG_TYPE_HELPER(cgroup_sock, bpf_set_retval)
+# define HAVE_SET_RETVAL 1
+#endif
+
 #endif /* ____BPF_FEATURES____ */

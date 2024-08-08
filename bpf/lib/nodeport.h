@@ -1680,13 +1680,21 @@ static __always_inline int nodeport_lb4(struct __ctx_buff *ctx,
 			if (!ret)
 				return NAT_46X64_RECIRC;
 		} else {
-			if (unlikely(svc->count == 0))
-				return DROP_NO_SERVICE;
+			// if (unlikely(svc->count == 0))
+			// 	return DROP_NO_SERVICE;
 
 			ret = lb4_local(get_ct_map4(&tuple), ctx, l3_off, l4_off,
 					&csum_off, &key, &tuple, svc, &ct_state_new,
 					ip4->saddr, ipv4_has_l4_header(ip4),
 					skip_l3_xlate);
+
+#ifdef SERVICE_NO_BACKEND_RESPONSE
+			if (ret == DROP_NO_SERVICE) {
+				ep_tail_call(ctx, CILIUM_CALL_IPV4_NO_SERVICE);
+				return DROP_MISSED_TAIL_CALL;
+			}
+#endif
+
 		}
 		if (IS_ERR(ret))
 			return ret;

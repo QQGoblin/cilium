@@ -1110,6 +1110,18 @@ const (
 	EnableStaleCiliumEndpointCleanup = "enable-stale-cilium-endpoint-cleanup"
 
 	DisableNatResvPort = "disable-nat-resv-port"
+
+	// ServiceNoBackendResponse is the name of the option to pick how to handle traffic for services
+	// without any backends
+	ServiceNoBackendResponse = "service-no-backend-response"
+
+	// ServiceNoBackendResponseReject is the name of the option to reject traffic for services
+	// without any backends
+	ServiceNoBackendResponseReject = "reject"
+
+	// ServiceNoBackendResponseDrop is the name of the option to drop traffic for services
+	// without any backends
+	ServiceNoBackendResponseDrop = "drop"
 )
 
 // Default string arguments
@@ -2274,6 +2286,9 @@ type DaemonConfig struct {
 	EnableStaleCiliumEndpointCleanup bool
 
 	DisableNatResvPort bool
+
+	// ServiceNoBackendResponse determines how we handle traffic to a service with no backends.
+	ServiceNoBackendResponse string
 }
 
 var (
@@ -3284,6 +3299,15 @@ func (c *DaemonConfig) Populate() {
 
 	// Envoy secrets namespace to watch
 	c.EnvoySecretNamespace = viper.GetString(IngressSecretsNamespace)
+
+	c.ServiceNoBackendResponse = viper.GetString(ServiceNoBackendResponse)
+	switch c.ServiceNoBackendResponse {
+	case ServiceNoBackendResponseReject, ServiceNoBackendResponseDrop:
+	case "":
+		c.ServiceNoBackendResponse = ServiceNoBackendResponseReject
+	default:
+		log.Fatalf("Invalid value for --%s: %s (must be 'reject' or 'drop')", ServiceNoBackendResponse, c.ServiceNoBackendResponse)
+	}
 }
 
 func (c *DaemonConfig) additionalMetrics() []string {
