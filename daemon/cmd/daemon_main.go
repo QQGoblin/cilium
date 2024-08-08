@@ -1154,6 +1154,9 @@ func initializeFlags() {
 	flags.Bool(option.DisableNatResvPort, false, "Disable use resvport for snat")
 	option.BindEnv(option.DisableNatResvPort)
 
+	flags.String(option.ServiceNoBackendResponse, option.ServiceNoBackendResponseReject, "Response to traffic for a service without backends")
+	option.BindEnv(option.ServiceNoBackendResponse)
+
 	viper.BindPFlags(flags)
 }
 
@@ -1476,6 +1479,14 @@ func initEnv(cmd *cobra.Command) {
 			node.SetIPv4(ip)
 		}
 	}
+
+	if err = probes.HaveSKBAdjustRoomL2RoomMACSupport(); err != nil {
+		if option.Config.ServiceNoBackendResponse == option.ServiceNoBackendResponseReject {
+			log.Warn("The kernel does not support --service-no-backend-response=reject, falling back to --service-no-backend-response=drop")
+			option.Config.ServiceNoBackendResponse = option.ServiceNoBackendResponseDrop
+		}
+	}
+	log.Infof("Running with --service-no-backend-response=%s", option.Config.ServiceNoBackendResponse)
 
 	k8s.SidecarIstioProxyImageRegexp, err = regexp.Compile(option.Config.SidecarIstioProxyImage)
 	if err != nil {

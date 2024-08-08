@@ -1253,12 +1253,20 @@ static __always_inline int __tail_handle_ipv4(struct __ctx_buff *ctx)
 				goto skip_service_lookup;
 			}
 #endif /* ENABLE_L7_LB */
-			if (unlikely(svc->count == 0))
-				return DROP_NO_SERVICE;
+//			if (unlikely(svc->count == 0))
+//				return DROP_NO_SERVICE;
 
 			ret = lb4_local(get_ct_map4(&tuple), ctx, ETH_HLEN, l4_off,
 					&csum_off, &key, &tuple, svc, &ct_state_new,
 					ip4->saddr, has_l4_header, false);
+
+#ifdef SERVICE_NO_BACKEND_RESPONSE
+			if (ret == DROP_NO_SERVICE) {
+			    ep_tail_call(ctx, CILIUM_CALL_IPV4_NO_SERVICE);
+			    return DROP_MISSED_TAIL_CALL;
+		    }
+#endif
+
 			if (IS_ERR(ret))
 				return ret;
 		}
