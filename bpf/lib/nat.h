@@ -754,6 +754,11 @@ snat_v4_process(struct __ctx_buff *ctx, enum nat_dir dir,
 	case IPPROTO_ICMP:
 		if (ctx_load_bytes(ctx, off, &icmphdr, sizeof(icmphdr)) < 0)
 			return DROP_INVALID;
+#ifdef SERVICE_NO_BACKEND_RESPONSE
+			if (icmphdr.type == ICMP_DEST_UNREACH) {
+			    return NAT_PUNT_TO_STACK;
+		    }
+#endif
 		if (icmphdr.type != ICMP_ECHO &&
 		    icmphdr.type != ICMP_ECHOREPLY)
 			return DROP_NAT_UNSUPP_PROTO;
