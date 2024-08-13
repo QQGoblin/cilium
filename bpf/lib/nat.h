@@ -410,7 +410,7 @@ static __always_inline int snat_v4_rewrite_egress(struct __ctx_buff *ctx,
 static __always_inline int snat_v4_rewrite_ingress(struct __ctx_buff *ctx,
 						   struct ipv4_ct_tuple *tuple,
 						   struct ipv4_nat_entry *state,
-						   __u32 off)
+						   __u32 off, bool __maybe_unused icmp_unreach_reply)
 {
 	int ret, flags = BPF_F_PSEUDO_HDR;
 	struct csum_offset csum = {};
@@ -434,6 +434,21 @@ static __always_inline int snat_v4_rewrite_ingress(struct __ctx_buff *ctx,
 			break;
 		case IPPROTO_ICMP: {
 			__be32 from, to;
+
+#ifdef SERVICE_NO_BACKEND_RESPONSE
+			if (icmp_unreach_reply) {
+			    // TODO: only support request is TCP packet
+				__u32 inter_off;
+				inter_off = off + sizeof(struct icmphdr) + offsetof(struct iphdr, saddr);
+				if (ctx_store_bytes(ctx, inter_off, &state->to_daddr,4, 0) < 0)
+					return DROP_WRITE_ERROR;
+				from = tuple->daddr;
+				to = state->to_daddr;
+				sum_l4 = csum_diff(&from, 4, &to, 4, 0);
+				csum.offset = offsetof(struct icmphdr, checksum);
+				break;
+			}
+#endif
 
 			if (ctx_store_bytes(ctx, off +
 					    offsetof(struct icmphdr, un.echo.id),
@@ -733,6 +748,11 @@ snat_v4_process(struct __ctx_buff *ctx, enum nat_dir dir,
 	__u64 off;
 	int ret;
 
+#ifdef SERVICE_NO_BACKEND_RESPONSE
+	bool icmp_unreach_reply = false;
+	struct ipv4_ct_tuple icmp_unreach_tuple = {};
+#endif
+
 	build_bug_on(sizeof(struct ipv4_nat_entry) > 64);
 
 	if (!revalidate_data(ctx, &data, &data_end, &ip4))
@@ -742,6 +762,13 @@ snat_v4_process(struct __ctx_buff *ctx, enum nat_dir dir,
 	tuple.daddr = ip4->daddr;
 	tuple.saddr = ip4->saddr;
 	tuple.flags = dir;
+
+#ifdef SERVICE_NO_BACKEND_RESPONSE
+	icmp_unreach_tuple.daddr = ip4->daddr;
+	icmp_unreach_tuple.saddr = ip4->saddr;
+	icmp_unreach_tuple.flags = dir;
+#endif
+
 	off = ((void *)ip4 - data) + ipv4_hdrlen(ip4);
 	switch (tuple.nexthdr) {
 	case IPPROTO_TCP:
@@ -755,9 +782,20 @@ snat_v4_process(struct __ctx_buff *ctx, enum nat_dir dir,
 		if (ctx_load_bytes(ctx, off, &icmphdr, sizeof(icmphdr)) < 0)
 			return DROP_INVALID;
 #ifdef SERVICE_NO_BACKEND_RESPONSE
-			if (icmphdr.type == ICMP_DEST_UNREACH) {
+		if (icmphdr.type == ICMP_DEST_UNREACH && dir == NAT_DIR_EGRESS) {
 			    return NAT_PUNT_TO_STACK;
-		    }
+		}
+		if (icmphdr.type == ICMP_DEST_UNREACH && dir == NAT_DIR_INGRESS) {
+            if (ctx_load_bytes(ctx, off + sizeof(struct iphdr) + sizeof(struct icmphdr), &l4hdr, sizeof(l4hdr)) < 0){
+                return NAT_PUNT_TO_STACK;
+            }
+			icmp_unreach_tuple.dport = l4hdr.sport;
+			icmp_unreach_tuple.sport = l4hdr.dport;
+			// TODO: support udp or other ?
+			icmp_unreach_tuple.nexthdr = IPPROTO_TCP;
+			icmp_unreach_reply = true;
+			break;
+		}
 #endif
 		if (icmphdr.type != ICMP_ECHO &&
 		    icmphdr.type != ICMP_ECHOREPLY)
@@ -775,6 +813,15 @@ snat_v4_process(struct __ctx_buff *ctx, enum nat_dir dir,
 		return NAT_PUNT_TO_STACK;
 	};
 
+#ifdef SERVICE_NO_BACKEND_RESPONSE
+    if (icmp_unreach_reply){
+        state = snat_v4_lookup(&icmp_unreach_tuple);
+        if (state)
+            goto service_no_backend_response;
+        return DROP_NAT_NO_MAPPING;
+    }
+#endif
+
 	if (snat_v4_can_skip(target, &tuple, dir, icmp_echoreply))
 		return NAT_PUNT_TO_STACK;
 	ret = snat_v4_handle_mapping(ctx, &tuple, &state, &tmp, dir, off, target);
@@ -783,9 +830,16 @@ snat_v4_process(struct __ctx_buff *ctx, enum nat_dir dir,
 	if (ret < 0)
 		return ret;
 
+#ifdef SERVICE_NO_BACKEND_RESPONSE
+service_no_backend_response:
+    if (icmp_unreach_reply){
+        return snat_v4_rewrite_ingress(ctx, &tuple, state, off, true);
+    }
+#endif
+
 	return dir == NAT_DIR_EGRESS ?
 	       snat_v4_rewrite_egress(ctx, &tuple, state, off, ipv4_has_l4_header(ip4)) :
-	       snat_v4_rewrite_ingress(ctx, &tuple, state, off);
+	       snat_v4_rewrite_ingress(ctx, &tuple, state, off, false);
 }
 #else
 static __always_inline __maybe_unused
